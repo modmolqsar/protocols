@@ -1,0 +1,159 @@
+ANÁLISE
+#ativação do gromacs
+source /usr/local/gromacs/bin/GMXRC
+
+#criar index.ndx
+gmx make_ndx -f nvt-pr.pdb <<EOF
+q
+EOF
+
+#salvar referencia somente proteina
+gmx editconf -f npt-longrun.tpr -o ref_pdb.pdb -n index.ndx <<EOF
+System
+EOF
+
+--> Depois da criação do index
+Abrir o documento index.ndx
+Procurar por [ Protein ] e o [ LIGANTE ] (Como quer que seu ligante esteja escrito)
+Trocar o nome do ligante para Ligand, então [ Ligand ]
+Pegar a parte do código da proteína e do ligante (sem os títulos)
+Jogar pro final do documento de texto e criar um [ Complex ]
+Ctrl+S para salvar
+
+#consertar pbc e salvar trajetoria somente proteina
+gmx trjconv -f npt-longrun.trr -s npt-longrun.tpr -o md_protein.xtc -pbc nojump -n index.ndx <<EOF
+System
+EOF
+
+#centralizar a proteina
+gmx trjconv -f md_protein.xtc -s ref_pdb.pdb -o md_protein_fit.xtc -fit rot+trans <<EOF
+Protein
+System
+EOF
+
+PARA RMSF (para concatenar depois, foi o que funcionou para mim)
+
+(100 ns pode ser mudado para qualquer momento que começou o equilíbrio)
+# 1. remover saltos (nojump) a partir de 100 ns 
+gmx trjconv -f npt-longrun.trr -s npt-longrun.tpr \
+-o md_nojump_eq.xtc -pbc nojump -b 100000
+# selecione: Protein
+
+
+# 2. reconstruir molécula + centralizar
+gmx trjconv -f md_nojump_eq.xtc -s npt-longrun.tpr \
+-o md_center_eq.xtc -pbc mol -center
+# selecione:
+# Protein (center)
+# Protein (output)
+
+
+# 3. fitting (remover rotação/translação)
+gmx trjconv -f md_center_eq.xtc -s npt-longrun.tpr \
+-o md_fit_eq.xtc -fit rot+trans
+# selecione:
+# Protein (fit group)
+# Protein (output)
+
+
+# 4. RMSF
+gmx rmsf -f md_fit_eq.xtc -s npt-longrun.tpr -res
+# selecione: C-alpha
+
+#-------------ANALISE------------------#
+
+#rmsd
+gmx rms -f md_protein_fit.xtc -s ref_pdb.pdb -o rmsd_protein.xvg -tu ns -n index.ndx  <<EOF
+Backbone
+Backbone
+EOF
+
+#rmsd
+gmx rms -f md_protein_fit.xtc -s ref_pdb.pdb -o rmsd_ligand.xvg -tu ns -n index.ndx <<EOF
+Ligand
+Ligand
+EOF
+
+#rmsd
+gmx rms -f md_protein_fit.xtc -s ref_pdb.pdb -o rmsd_complex.xvg -tu ns -n index.ndx <<EOF
+Complex 
+Complex
+EOF
+
+#rmsf proteína apo
+gmx rmsf -f md_protein_fit.xtc -s ref_pdb.pdb -o rmsf_proteinapo_bb.xvg -res -n index.ndx <<EOF
+Backbone
+EOF
+
+#rmsf complex
+gmx rmsf -f md_protein_fit_cut.xtc -s ref_pdb.pdb -o rmsf_complex_cut.xvg -res -n index.ndx <<EOF
+Complex
+EOF
+
+gmx rmsf -f md_protein_fit_concat.xtc -s ref_pdb.pdb -o rmsf_complex_cut_concat.xvg -res -n index.ndx <<EOF
+Protein
+EOF
+
+#raio de giro complex
+gmx gyrate -f md_protein_fit.xtc -s ref_pdb.pdb -o rg.xvg -n index.ndx <<EOF
+Complex
+EOF
+
+#raio de giro (proteina apo)
+gmx gyrate -f md_protein_fit.xtc -s ref_pdb.pdb -o rg_proteinapo.xvg -n index.ndx <<EOF
+Backbone
+EOF
+
+#sasa
+gmx sasa -f md_protein_fit.xtc -s ref_pdb.pdb -o sasa.xvg -tu ns -n index.ndx <<EOF
+Complex
+EOF
+
+#interhb
+gmx hbond -f md_protein_fit.xtc -s npt-longrun.tpr -num intrahbond.xvg -n index.ndx <<EOF
+Protein
+Ligand
+EOF
+
+#MMPBSA
+--> mudar o -cg 1 13 para qualquer que seja a posição do [ Protein ] [ Ligand ] no index.ndx
+
+conda activate gmxMMPBSA
+gmx_MMPBSA -O -i mmpbsa.in -cs npt-longrun.tpr -ct md_protein_fit.xtc -ci index.ndx -cg 1 13 -cp topol.top -o FINAL_RESULTS_MMPBSA.dat -eo FINAL_RESULTS_MMPBSA.csv
+
+
+#concatenar as trajetorias:
+gmx trjcat \
+-f md_fit_eq_1.xtc md_fit_eq_2.xtc md_fit_eq_3.xtc \
+-o md_protein_fit_concat.xtc \
+-settime <<EOF
+0
+200000
+400000
+EOF
+
+#fazer video no vmd:
+
+ir em extensions, tk console e inserir:
+for {set i 0} {$i < [molinfo top get numframes]} {incr i} {
+    animate goto $i
+    render TachyonInternal frame_$i.tga
+}
+
+quando tiver acabado, abrir terminal na pasta original e inserir:
+ffmpeg -i frame_%d.tga -vcodec libx264 -pix_fmt yuv420p video.mp4
+
+#Clusterização
+--> tem que ser com as réplicas concatenadas
+
+gmx cluster \
+-s npt-longrun.tpr \
+-f md_fit_eq_3rep_concat.xtc \
+-method gromos \
+-cutoff 0.2 \
+-o clusters_gromos.xpm \
+-g clusters_gromos.log \
+-cl centroides_gromos.pdb \
+-dist rmsd_distribution.xvg \
+-sz cluster_size.xvg \
+-n index_complex.ndx
